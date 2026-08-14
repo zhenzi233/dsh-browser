@@ -12,9 +12,46 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        // 全局异常兜底：任何未处理异常都写入日志文件（%LOCALAPPDATA%\DshBrowser\crash.log），
+        // UI 线程异常尝试恢复，进程级异常记录后退出——绝不静默消失。
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) =>
+        {
+            Log("UI 线程异常: " + e.Exception);
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            Log("进程级异常: " + e.ExceptionObject);
+        };
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new MainForm());
+        Log("启动 DSH 浏览器 " + Application.ProductVersion);
+        try
+        {
+            Application.Run(new MainForm());
+        }
+        catch (Exception ex)
+        {
+            Log("主循环异常: " + ex);
+            throw;
+        }
+    }
+
+    /// <summary>追加一行运行日志到 %LOCALAPPDATA%\DshBrowser\dsh-browser.log。</summary>
+    internal static void Log(string message)
+    {
+        try
+        {
+            var dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DshBrowser");
+            Directory.CreateDirectory(dir);
+            File.AppendAllText(Path.Combine(dir, "dsh-browser.log"),
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}");
+        }
+        catch
+        {
+            // 日志失败不影响运行
+        }
     }
 }
 
@@ -47,6 +84,7 @@ internal sealed class MainForm : Form
         Height = 900;
         MinimumSize = new Size(1000, 680);
         StartPosition = FormStartPosition.CenterScreen;
+        FormClosing += (_, _) => Program.Log("窗口关闭（正常退出）");
 
         // 底部状态条：连接状态 + 重新连接按钮
         _status.Items.Add(_statusLabel);
@@ -83,10 +121,31 @@ internal sealed class MainForm : Form
             core.Settings.IsStatusBarEnabled = false;
             core.NewWindowRequested += (_, args) =>
             {
-                // 外部链接交给系统默认浏览器，本窗口只服务 DSH
-                args.Handled = true;
-                if (!string.IsNullOrEmpty(args.Uri))
-                    Process.Start(new ProcessStartInfo(args.Uri) { UseShellExecute = true });
+                try
+                {
+                    // 外部链接交给系统默认浏览器，本窗口只服务 DSH
+                    args.Handled = true;
+                    if (!string.IsNullOrEmpty(args.Uri))
+                        Process.Start(new ProcessStartInfo(args.Uri) { UseShellExecute = true });
+                }
+                catch (Exception ex)
+                {
+                    Program.Log("新窗口请求处理异常: " + ex.Message);
+                }
+            };
+            core.ProcessFailed += (_, e) =>
+            {
+                // 渲染/GPU 等子进程崩溃：不关窗口，记录日志并尝试自动恢复
+                Program.Log("WebView2 子进程失败: " + e.ProcessFailedKind);
+                try
+                {
+                    SetStatus("渲染进程异常，正在自动恢复…", false);
+                    _web.CoreWebView2.Reload();
+                }
+                catch (Exception ex)
+                {
+                    Program.Log("自动恢复失败: " + ex.Message);
+                }
             };
             core.NavigationCompleted += OnNavigationCompleted;
 
@@ -368,19 +427,19 @@ internal sealed class MainForm : Form
 
     private async void ReloadAsync()
     {
-        if (!_loaded)
-        {
-            _startupRequested = false;
-            await EnsureWebAsync();
-            return;
-        }
         try
         {
+            if (!_loaded)
+            {
+                _startupRequested = false;
+                await EnsureWebAsync();
+                return;
+            }
             _web.CoreWebView2.Reload();
         }
-        catch
+        catch (Exception ex)
         {
-            // 忽略：下次按键再试
+            Program.Log("刷新异常: " + ex.Message);
         }
     }
 
