@@ -268,25 +268,69 @@ internal sealed class MainForm : Form
         return null;
     }
 
-    /// <summary>通过 `npm root -g` 定位 @deepseek-ai/dsh/lib/bin.js。</summary>
+    /// <summary>
+    /// 定位 @deepseek-ai/dsh/lib/bin.js：npm 全局 → pnpm 全局 → %LOCALAPPDATA%\pnpm\global 搜索。
+    /// Windows 上 npm/pnpm 是 .cmd 脚本，必须经 cmd.exe /c 调用。
+    /// </summary>
     private static string? FindDshBin()
+    {
+        // 1. npm root -g
+        var root = RunGlobalRoot("npm");
+        if (root != null)
+        {
+            var cand = Path.Combine(root, "@deepseek-ai", "dsh", "lib", "bin.js");
+            if (File.Exists(cand)) return cand;
+        }
+        // 2. pnpm root -g（若 pnpm 在 PATH）
+        if (FindOnPath("pnpm.cmd") != null || FindOnPath("pnpm") != null)
+        {
+            var proot = RunGlobalRoot("pnpm");
+            if (proot != null)
+            {
+                var cand = Path.Combine(proot, "@deepseek-ai", "dsh", "lib", "bin.js");
+                if (File.Exists(cand)) return cand;
+            }
+        }
+        // 3. %LOCALAPPDATA%\pnpm\global 下常见布局搜索（pnpm 7/8 的 global/5 等）
+        try
+        {
+            var pnpmBase = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "pnpm", "global");
+            if (Directory.Exists(pnpmBase))
+            {
+                foreach (var vdir in Directory.GetDirectories(pnpmBase))
+                {
+                    var cand = Path.Combine(vdir, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
+                    if (File.Exists(cand)) return cand;
+                }
+            }
+        }
+        catch
+        {
+            // 忽略搜索失败
+        }
+        return null;
+    }
+
+    // 运行 "npm root -g" / "pnpm root -g" 并返回首行输出（全局 node_modules 根），失败返回 null。
+    private static string? RunGlobalRoot(string cmd)
     {
         try
         {
-            var psi = new ProcessStartInfo("npm", "root -g")
+            var psi = new ProcessStartInfo("cmd.exe", "/c " + cmd + " root -g")
             {
                 RedirectStandardOutput = true,
                 UseShellExecute = false,
-                CreateNoWindow = true
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
             };
             using var p = Process.Start(psi);
             if (p == null) return null;
             var output = p.StandardOutput.ReadToEnd().Trim();
-            if (!p.WaitForExit(5000)) return null;
+            if (!p.WaitForExit(8000)) return null;
             var root = output.Split('\n')[0].Trim();
-            if (root.Length == 0) return null;
-            var cand = Path.Combine(root, "@deepseek-ai", "dsh", "lib", "bin.js");
-            return File.Exists(cand) ? cand : null;
+            return root.Length == 0 ? null : root;
         }
         catch
         {
