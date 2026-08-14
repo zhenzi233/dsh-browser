@@ -44,12 +44,13 @@ dotnet publish -c Release -r win-x64 --self-contained false --configfile NuGet.C
 > 若你的机器 NuGet 配置链里有失效的本地源（如 `D:\VSSDK\NuGetPackages`），
 > 必须用 `--configfile` 指定它才能 restore 成功。
 
-## 部署（本机参考）
+## 部署
 
-- 应用目录：`C:\Users\19945\.dsh\apps\dsh-browser\`（exe + WebView2 DLL）
-- 桌面快捷方式：`DSH 浏览器.lnk`
-- 自动拉起依赖脚本：`C:\Users\19945\.dsh\src\scripts\start-dsh-web.ps1`
-  （程序里写死了该路径，换机器时请修改 `Program.cs` 的 `StartScript` 常量后重新构建）
+- 发布产物直接拷到任意目录（exe + 同目录 DLL 一起）
+- 可选：为 `DshBrowser.exe` 创建桌面快捷方式
+- 自动拉起依赖脚本 `%USERPROFILE%\.dsh\src\scripts\start-dsh-web.ps1`
+  （程序运行时按 `%USERPROFILE%` 动态解析该路径，无需改代码；换机器只要
+  该脚本存在于相同相对位置即可）
 
 ## 技术要点
 
