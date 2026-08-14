@@ -1,6 +1,7 @@
 # 编译产物
 bin/
 obj/
+publish-standalone/
 
 # 用户本地数据
 *.user
