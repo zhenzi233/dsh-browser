@@ -1,0 +1,251 @@
+using System.Diagnostics;
+using System.Drawing;
+using System.Net.Sockets;
+using System.Windows.Forms;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.WinForms;
+
+namespace DshBrowser;
+
+internal static class Program
+{
+    [STAThread]
+    private static void Main()
+    {
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+        Application.Run(new MainForm());
+    }
+}
+
+/// <summary>
+/// DSH 专用浏览器外壳：仅加载 DeepSeek Harness Web GUI（http://127.0.0.1:3080）。
+/// web 未运行时自动调用 start-dsh-web.ps1 拉起；独立 WebView2 数据目录，与其他浏览器完全隔离。
+/// </summary>
+internal sealed class MainForm : Form
+{
+    private const string HomeUrl = "http://127.0.0.1:3080";
+    private const int Port = 3080;
+    private const string StartScript = @"C:\Users\19945\.dsh\src\scripts\start-dsh-web.ps1";
+
+    private readonly WebView2 _web = new();
+    private readonly StatusStrip _status = new();
+    private readonly ToolStripStatusLabel _statusLabel = new();
+    private readonly ToolStripButton _retryButton = new("重新连接");
+    private bool _startupRequested;
+    private bool _loaded;
+
+    public MainForm()
+    {
+        Text = "DSH 浏览器";
+        Icon = LoadAppIcon();
+        Width = 1400;
+        Height = 900;
+        MinimumSize = new Size(1000, 680);
+        StartPosition = FormStartPosition.CenterScreen;
+
+        // 底部状态条：连接状态 + 重新连接按钮
+        _status.Items.Add(_statusLabel);
+        _status.Items.Add(new ToolStripSpring());
+        _status.Items.Add(_retryButton);
+        _retryButton.Visible = false;
+        _retryButton.Click += (_, _) =>
+        {
+            _retryButton.Visible = false;
+            ReloadAsync();
+        };
+        _status.Dock = DockStyle.Bottom;
+        Controls.Add(_status);
+
+        // WebView2 铺满剩余区域
+        _web.Dock = DockStyle.Fill;
+        Controls.Add(_web);
+
+        KeyPreview = true;
+        KeyDown += OnKeyDown;
+        Load += OnLoad;
+    }
+
+    private async void OnLoad(object? sender, EventArgs e)
+    {
+        try
+        {
+            var userData = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DshBrowser");
+            var env = await CoreWebView2Environment.CreateAsync(userDataFolder: userData);
+            await _web.EnsureCoreWebView2Async(env);
+
+            var core = _web.CoreWebView2;
+            core.Settings.IsStatusBarEnabled = false;
+            core.NewWindowRequested += (_, args) =>
+            {
+                // 外部链接交给系统默认浏览器，本窗口只服务 DSH
+                args.Handled = true;
+                if (!string.IsNullOrEmpty(args.Uri))
+                    Process.Start(new ProcessStartInfo(args.Uri) { UseShellExecute = true });
+            };
+            core.NavigationCompleted += OnNavigationCompleted;
+
+            await EnsureWebAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"初始化失败: {ex.Message}", false);
+        }
+    }
+
+    /// <summary>确保 dsh web 在线后加载主页。</summary>
+    private async Task EnsureWebAsync()
+    {
+        if (IsPortOpen())
+        {
+            LoadHomeAsync();
+            return;
+        }
+        if (_startupRequested)
+        {
+            await WaitForWebAsync();
+            return;
+        }
+        _startupRequested = true;
+        SetStatus("dsh web 未运行，正在自动启动…", false);
+        try
+        {
+            var psi = new ProcessStartInfo("powershell",
+                "-NoProfile -ExecutionPolicy Bypass -File \"" + StartScript + "\" -NoBrowser")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+            Process.Start(psi);
+        }
+        catch
+        {
+            // 启动失败由下面的超时提示兜底
+        }
+        await WaitForWebAsync();
+    }
+
+    private async Task WaitForWebAsync()
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(50);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (IsPortOpen())
+            {
+                LoadHomeAsync();
+                return;
+            }
+            await Task.Delay(800);
+        }
+        SetStatus("等待 dsh web 就绪超时，请先运行桌面「启动 DSH Web」", false);
+        _retryButton.Visible = true;
+    }
+
+    private void LoadHomeAsync()
+    {
+        SetStatus("已连接 dsh web", true);
+        try
+        {
+            _web.CoreWebView2.Navigate(HomeUrl);
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"导航失败: {ex.Message}", false);
+        }
+    }
+
+    private void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
+    {
+        _loaded = e.IsSuccess;
+        if (e.IsSuccess)
+        {
+            SetStatus("已连接 dsh web", true);
+            _retryButton.Visible = false;
+        }
+        else
+        {
+            SetStatus("页面加载失败（web 可能已停止），Ctrl+R 或点「重新连接」", false);
+            _retryButton.Visible = true;
+        }
+    }
+
+    private async void ReloadAsync()
+    {
+        if (!_loaded)
+        {
+            _startupRequested = false;
+            await EnsureWebAsync();
+            return;
+        }
+        try
+        {
+            _web.CoreWebView2.Reload();
+        }
+        catch
+        {
+            // 忽略：下次按键再试
+        }
+    }
+
+    private void OnKeyDown(object? sender, KeyEventArgs e)
+    {
+        if ((e.Control && e.KeyCode == Keys.R) || e.KeyCode == Keys.F5)
+        {
+            e.Handled = true;
+            ReloadAsync();
+        }
+        else if (e.Control && e.KeyCode == Keys.H)
+        {
+            e.Handled = true;
+            LoadHomeAsync();
+        }
+    }
+
+    private static bool IsPortOpen()
+    {
+        try
+        {
+            using var c = new TcpClient();
+            c.Connect("127.0.0.1", Port);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void SetStatus(string text, bool ok)
+    {
+        _statusLabel.Text = " ● " + text;
+        _statusLabel.ForeColor = ok ? Color.SeaGreen : Color.Firebrick;
+    }
+
+    private static Icon LoadAppIcon()
+    {
+        var ico = Path.Combine(AppContext.BaseDirectory, "app.ico");
+        if (File.Exists(ico))
+        {
+            try
+            {
+                return new Icon(ico);
+            }
+            catch
+            {
+                // 回退默认图标
+            }
+        }
+        return SystemIcons.Application;
+    }
+}
+
+/// <summary>状态条弹簧占位，把右侧按钮推到最右。</summary>
+internal sealed class ToolStripSpring : ToolStripStatusLabel
+{
+    public ToolStripSpring()
+    {
+        Spring = true;
+    }
+}
