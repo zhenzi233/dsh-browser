@@ -26,7 +26,11 @@ internal sealed class MainForm : Form
 {
     private const string HomeUrl = "http://127.0.0.1:3080";
     private const int Port = 3080;
-    private const string StartScript = @"C:\Users\19945\.dsh\src\scripts\start-dsh-web.ps1";
+
+    /// <summary>启动脚本路径：%USERPROFILE%\.dsh\src\scripts\start-dsh-web.ps1（动态解析，不写死用户目录）。</summary>
+    private static string StartScript =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".dsh", "src", "scripts", "start-dsh-web.ps1");
 
     private readonly WebView2 _web = new();
     private readonly StatusStrip _status = new();
