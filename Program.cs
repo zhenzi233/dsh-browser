@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Drawing;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
@@ -9,9 +11,32 @@ namespace DshBrowser;
 
 internal static class Program
 {
+    /// <summary>单实例广播消息：通知已有实例显示主窗口。</summary>
+    internal static readonly int WmShowMain = RegisterWindowMessage("DshBrowser.ShowMain");
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int RegisterWindowMessage(string lpString);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
     [STAThread]
     private static void Main()
     {
+        // 单实例：已有实例在运行时，通知它显示窗口后本实例退出
+        using var mutex = new Mutex(true, @"Local\DshBrowser.SingleInstance", out var createdNew);
+        if (!createdNew)
+        {
+            foreach (var p in Process.GetProcessesByName("DshBrowser"))
+            {
+                if (p.MainWindowHandle != IntPtr.Zero)
+                {
+                    SendMessage(p.MainWindowHandle, WmShowMain, IntPtr.Zero, IntPtr.Zero);
+                    break;
+                }
+            }
+            return;
+        }
         // 全局异常兜底：任何未处理异常都写入日志文件（%LOCALAPPDATA%\DshBrowser\crash.log），
         // UI 线程异常尝试恢复，进程级异常记录后退出——绝不静默消失。
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
@@ -73,6 +98,10 @@ internal sealed class MainForm : Form
     private readonly StatusStrip _status = new();
     private readonly ToolStripStatusLabel _statusLabel = new();
     private readonly ToolStripButton _retryButton = new("重新连接");
+    private readonly NotifyIcon _tray = new();
+    private readonly ContextMenuStrip _trayMenu = new();
+    private bool _allowExit;
+    private bool _trayHintShown;
     private bool _startupRequested;
     private bool _loaded;
 
@@ -84,7 +113,20 @@ internal sealed class MainForm : Form
         Height = 900;
         MinimumSize = new Size(1000, 680);
         StartPosition = FormStartPosition.CenterScreen;
-        FormClosing += (_, _) => Program.Log("窗口关闭（正常退出）");
+        FormClosing += OnFormClosing;
+
+        // 系统托盘：关闭按钮 = 最小化到托盘；右键菜单「打开 / 退出」
+        _tray.Icon = Icon;
+        _tray.Text = "DSH 浏览器";
+        _tray.Visible = true;
+        _trayMenu.Items.Add("打开", null, (_, _) => ShowMainWindow());
+        _trayMenu.Items.Add(new ToolStripSeparator());
+        _trayMenu.Items.Add("退出", null, (_, _) => ExitApp());
+        _tray.ContextMenuStrip = _trayMenu;
+        _tray.MouseClick += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Left) ShowMainWindow();
+        };
 
         // 底部状态条：连接状态 + 重新连接按钮
         _status.Items.Add(_statusLabel);
@@ -492,6 +534,57 @@ internal sealed class MainForm : Form
             }
         }
         return SystemIcons.Application;
+    }
+
+    /// <summary>拦截窗口关闭：点 X = 最小化到托盘；托盘菜单「退出」才真正退出。</summary>
+    private void OnFormClosing(object? sender, FormClosingEventArgs e)
+    {
+        if (!_allowExit && e.CloseReason == CloseReason.UserClosing)
+        {
+            e.Cancel = true;
+            HideToTray();
+            return;
+        }
+        Program.Log("窗口关闭（正常退出）");
+        _tray.Visible = false;
+        _tray.Dispose();
+        _trayMenu.Dispose();
+    }
+
+    private void HideToTray()
+    {
+        Hide();
+        if (!_trayHintShown)
+        {
+            _trayHintShown = true;
+            _tray.BalloonTipTitle = "DSH 浏览器仍在后台运行";
+            _tray.BalloonTipText = "已最小化到系统托盘。右键托盘图标可「打开 / 退出」。";
+            _tray.ShowBalloonTip(3500);
+        }
+    }
+
+    private void ShowMainWindow()
+    {
+        Show();
+        WindowState = FormWindowState.Normal;
+        Activate();
+        BringToFront();
+    }
+
+    private void ExitApp()
+    {
+        _allowExit = true;
+        Close();
+    }
+
+    /// <summary>处理单实例广播消息：第二个实例启动时通知本窗口显示。</summary>
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == Program.WmShowMain)
+        {
+            ShowMainWindow();
+        }
+        base.WndProc(ref m);
     }
 }
 
