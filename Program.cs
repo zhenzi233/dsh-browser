@@ -116,12 +116,23 @@ internal sealed class MainForm : Form
         var launchKind = TryStartDshWeb();
         if (launchKind == "none")
         {
-            SetStatus("未找到 dsh：请先安装 DSH（npm i -g @deepseek-ai/dsh）或在终端运行 dsh web，然后点「重新连接」", false);
+            SetStatus("未找到 dsh（" + DiagnoseEnvironment() + "）。请安装 DSH 或在终端运行 dsh web 后点「重新连接」", false);
             _retryButton.Visible = true;
             return;
         }
         await WaitForWebAsync(launchKind == "script" ? 50 : 90);
     }
+
+    /// <summary>生成排障诊断摘要：node / dsh 命令 / npm 全局各自是否存在。</summary>
+    private static string DiagnoseEnvironment()
+    {
+        var node = FindOnPath("node.exe") != null;
+        var dshCmd = FindOnPath("dsh.cmd") != null || FindOnPath("dsh.ps1") != null || FindOnPath("dsh") != null;
+        var npmGlobal = FindDshBin() != null;
+        return $"node:{Bool(node)} dsh命令:{Bool(dshCmd)} npm全局:{Bool(npmGlobal)}";
+    }
+
+    private static string Bool(bool value) => value ? "有" : "无";
 
     private async Task WaitForWebAsync(int timeoutSeconds)
     {
@@ -141,11 +152,11 @@ internal sealed class MainForm : Form
 
     /// <summary>
     /// 尝试拉起 dsh web，返回启动方式：script=外部脚本 / builtin=内置探测启动 / none=未找到 dsh。
-    /// 优先使用 %USERPROFILE%\.dsh\src\scripts\start-dsh-web.ps1（本机环境已验证）；
-    /// 不存在时内置探测 node + npm 全局 @deepseek-ai/dsh 直接启动，让绿色版开箱即用。
+    /// 探测顺序：外部脚本 → node + npm 全局 @deepseek-ai/dsh → PATH 中的 dsh 命令（cmd /c）→ 常见 npm 全局根。
     /// </summary>
     private static string TryStartDshWeb()
     {
+        // 1. 外部脚本（本机完整 .dsh 环境）
         if (File.Exists(StartScript))
         {
             try
@@ -165,26 +176,76 @@ internal sealed class MainForm : Form
                 // 脚本方式失败，降级到内置探测
             }
         }
+        // 2. node + npm 全局 @deepseek-ai/dsh（标准 npm 安装）
         var node = FindOnPath("node.exe");
-        if (node == null) return "none";
         var dshBin = FindDshBin();
-        if (dshBin == null) return "none";
-        try
+        if (node != null && dshBin != null)
         {
-            var psi = new ProcessStartInfo(node, "\"" + dshBin + "\" web")
+            try
             {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden,
-                WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
-            };
-            Process.Start(psi);
-            return "builtin";
+                var psi = new ProcessStartInfo(node, "\"" + dshBin + "\" web")
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                    WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+                };
+                Process.Start(psi);
+                return "builtin-npm";
+            }
+            catch
+            {
+                // 继续降级
+            }
         }
-        catch
+        // 3. PATH 中的 dsh 命令（终端能跑 dsh 就一定存在；兼容 pnpm/volta/克隆仓库等任意安装方式）
+        if (FindOnPath("dsh.cmd") != null || FindOnPath("dsh.ps1") != null || FindOnPath("dsh") != null)
         {
-            return "none";
+            try
+            {
+                var psi = new ProcessStartInfo("cmd.exe", "/c dsh web")
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                    WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+                };
+                Process.Start(psi);
+                return "builtin-cmd";
+            }
+            catch
+            {
+                // 继续降级
+            }
         }
+        // 4. 常见 npm 全局根兜底（%APPDATA%\npm\node_modules）
+        if (node != null)
+        {
+            try
+            {
+                var root = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "npm", "node_modules");
+                var cand = Path.Combine(root, "@deepseek-ai", "dsh", "lib", "bin.js");
+                if (File.Exists(cand))
+                {
+                    var psi = new ProcessStartInfo(node, "\"" + cand + "\" web")
+                    {
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        WindowStyle = ProcessWindowStyle.Hidden,
+                        WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+                    };
+                    Process.Start(psi);
+                    return "builtin-fallback";
+                }
+            }
+            catch
+            {
+                // 兜底失败
+            }
+        }
+        return "none";
     }
 
     /// <summary>在 PATH 中查找可执行文件（node.exe 等）。</summary>
