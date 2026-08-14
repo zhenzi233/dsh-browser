@@ -161,6 +161,23 @@ internal sealed class MainForm : Form
 
             var core = _web.CoreWebView2;
             core.Settings.IsStatusBarEnabled = false;
+            // 本地可信应用：自动允许通知权限（DSH 的桌面通知依赖它）。
+            // 其他权限类型不处理（WebView2 默认拒绝），保持最小授权面。
+            core.PermissionRequested += (_, args) =>
+            {
+                try
+                {
+                    if (args.PermissionKind == CoreWebView2PermissionKind.Notifications)
+                    {
+                        args.State = CoreWebView2PermissionState.Allow;
+                        Program.Log("已允许通知权限请求");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Program.Log("权限请求处理异常: " + ex.Message);
+                }
+            };
             core.NewWindowRequested += (_, args) =>
             {
                 try
