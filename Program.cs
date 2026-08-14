@@ -108,32 +108,24 @@ internal sealed class MainForm : Form
         }
         if (_startupRequested)
         {
-            await WaitForWebAsync();
+            await WaitForWebAsync(50);
             return;
         }
         _startupRequested = true;
         SetStatus("dsh web 未运行，正在自动启动…", false);
-        try
+        var launchKind = TryStartDshWeb();
+        if (launchKind == "none")
         {
-            var psi = new ProcessStartInfo("powershell",
-                "-NoProfile -ExecutionPolicy Bypass -File \"" + StartScript + "\" -NoBrowser")
-            {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden
-            };
-            Process.Start(psi);
+            SetStatus("未找到 dsh：请先安装 DSH（npm i -g @deepseek-ai/dsh）或在终端运行 dsh web，然后点「重新连接」", false);
+            _retryButton.Visible = true;
+            return;
         }
-        catch
-        {
-            // 启动失败由下面的超时提示兜底
-        }
-        await WaitForWebAsync();
+        await WaitForWebAsync(launchKind == "script" ? 50 : 90);
     }
 
-    private async Task WaitForWebAsync()
+    private async Task WaitForWebAsync(int timeoutSeconds)
     {
-        var deadline = DateTime.UtcNow.AddSeconds(50);
+        var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
         while (DateTime.UtcNow < deadline)
         {
             if (IsPortOpen())
@@ -143,8 +135,102 @@ internal sealed class MainForm : Form
             }
             await Task.Delay(800);
         }
-        SetStatus("等待 dsh web 就绪超时，请先运行桌面「启动 DSH Web」", false);
+        SetStatus("等待 dsh web 就绪超时。已安装 dsh 的话请检查安装状态，或手动运行 dsh web 后点「重新连接」", false);
         _retryButton.Visible = true;
+    }
+
+    /// <summary>
+    /// 尝试拉起 dsh web，返回启动方式：script=外部脚本 / builtin=内置探测启动 / none=未找到 dsh。
+    /// 优先使用 %USERPROFILE%\.dsh\src\scripts\start-dsh-web.ps1（本机环境已验证）；
+    /// 不存在时内置探测 node + npm 全局 @deepseek-ai/dsh 直接启动，让绿色版开箱即用。
+    /// </summary>
+    private static string TryStartDshWeb()
+    {
+        if (File.Exists(StartScript))
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("powershell",
+                    "-NoProfile -ExecutionPolicy Bypass -File \"" + StartScript + "\" -NoBrowser")
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                Process.Start(psi);
+                return "script";
+            }
+            catch
+            {
+                // 脚本方式失败，降级到内置探测
+            }
+        }
+        var node = FindOnPath("node.exe");
+        if (node == null) return "none";
+        var dshBin = FindDshBin();
+        if (dshBin == null) return "none";
+        try
+        {
+            var psi = new ProcessStartInfo(node, "\"" + dshBin + "\" web")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+                WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            };
+            Process.Start(psi);
+            return "builtin";
+        }
+        catch
+        {
+            return "none";
+        }
+    }
+
+    /// <summary>在 PATH 中查找可执行文件（node.exe 等）。</summary>
+    private static string? FindOnPath(string exe)
+    {
+        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+        foreach (var dir in path.Split(';'))
+        {
+            if (string.IsNullOrWhiteSpace(dir)) continue;
+            try
+            {
+                var cand = Path.Combine(dir.Trim('"'), exe);
+                if (File.Exists(cand)) return cand;
+            }
+            catch
+            {
+                // 跳过不可访问目录
+            }
+        }
+        return null;
+    }
+
+    /// <summary>通过 `npm root -g` 定位 @deepseek-ai/dsh/lib/bin.js。</summary>
+    private static string? FindDshBin()
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("npm", "root -g")
+            {
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var p = Process.Start(psi);
+            if (p == null) return null;
+            var output = p.StandardOutput.ReadToEnd().Trim();
+            if (!p.WaitForExit(5000)) return null;
+            var root = output.Split('\n')[0].Trim();
+            if (root.Length == 0) return null;
+            var cand = Path.Combine(root, "@deepseek-ai", "dsh", "lib", "bin.js");
+            return File.Exists(cand) ? cand : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private void LoadHomeAsync()
